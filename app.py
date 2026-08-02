@@ -1,82 +1,152 @@
-from flask import Flask, request, jsonify
-from datetime import datetime
+import asyncio
 import uuid
+from datetime import datetime
+from aiohttp import web
 
-app = Flask(__name__)
-
-# Хранилище объявлений (в реальном приложении — БД)
-adverts = {}
-
-
-@app.route('/')
-def hello_world():
-    return 'Hello World! REST API for Ads'
+# Глобальное хранилище (в памяти).
+# В реальном проекте здесь была бы асинхронная база данных (например, AsyncPG для PostgreSQL)
+adverts_db = {}
 
 
-@app.route('/adverts', methods=['POST'])
-def create_advert():
-    """Создание нового объявления"""
-    data = request.get_json()
+async def create_advert(request: web.Request) -> web.Response:
+    """
+    POST /adverts
+    Создает новое объявление.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": "Invalid JSON body"},
+            status=400
+        )
 
-    if not data or 'title' not in data or 'description' not in data or 'owner' not in data:
-        return jsonify({'error': 'Missing required fields: title, description, owner'}), 400
+    # Валидация обязательных полей
+    required_fields = ['title', 'description', 'owner']
+    if not all(field in data for field in required_fields):
+        missing = [f for f in required_fields if f not in data]
+        return web.json_response(
+            {"error": f"Missing required fields: {', '.join(missing)}"},
+            status=400
+        )
 
+    # Генерация UUID
     ad_id = str(uuid.uuid4())
 
+    # Формирование объекта объявления
     advert = {
-        'id': ad_id,
-        'title': data['title'],
-        'description': data['description'],
-        'created_at': datetime.utcnow().isoformat() + 'Z',
-        'owner': data['owner']
+        "id": ad_id,
+        "title": data["title"],
+        "description": data["description"],
+        "owner": data["owner"],
+        "created_at": datetime.utcnow().isoformat() + "Z"
     }
 
-    adverts[ad_id] = advert
+    # Сохранение в "БД"
+    adverts_db[ad_id] = advert
 
-    return jsonify(advert), 201
-
-
-@app.route('/adverts', methods=['GET'])
-def get_all_adverts():
-    """Получение всех объявлений"""
-    return jsonify(list(adverts.values())), 200
+    # Возврат 201 Created
+    return web.json_response(advert, status=201)
 
 
-@app.route('/adverts/<ad_id>', methods=['GET'])
-def get_advert(ad_id):
-    """Получение объявления по ID (UUID-строка)"""
-    if ad_id not in adverts:
-        return jsonify({'error': 'Advert not found'}), 404
+async def get_all_adverts(request: web.Request) -> web.Response:
+    """
+    GET /adverts
+    Возвращает список всех объявлений.
+    """
+    return web.json_response(list(adverts_db.values()))
 
-    return jsonify(adverts[ad_id]), 200
+
+async def get_advert(request: web.Request) -> web.Response:
+    """
+    GET /adverts/{id}
+    Возвращает конкретное объявление по ID.
+    """
+    ad_id = request.match_info.get('id')
+
+    if ad_id not in adverts_db:
+        return web.json_response(
+            {"error": "Advert not found"},
+            status=404
+        )
+
+    return web.json_response(adverts_db[ad_id])
 
 
-@app.route('/adverts/<ad_id>', methods=['PUT'])
-def update_advert(ad_id):
-    """Обновление объявления по ID (UUID-строка)"""
-    if ad_id not in adverts:
-        return jsonify({'error': 'Advert not found'}), 404
+async def update_advert(request: web.Request) -> web.Response:
+    """
+    PUT /adverts/{id}
+    Обновляет объявление.
+    """
+    ad_id = request.match_info.get('id')
 
-    data = request.get_json()
-    advert = adverts[ad_id]
+    if ad_id not in adverts_db:
+        return web.json_response(
+            {"error": "Advert not found"},
+            status=404
+        )
 
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": "Invalid JSON body"},
+            status=400
+        )
+
+    advert = adverts_db[ad_id]
+
+    # Обновляем только переданные поля
     if 'title' in data:
         advert['title'] = data['title']
     if 'description' in data:
         advert['description'] = data['description']
+    if 'owner' in data:
+        advert['owner'] = data['owner']
 
-    return jsonify(advert), 200
+    # Можно обновить время последнего изменения, если нужно:
+    # advert['updated_at'] = datetime.utcnow().isoformat() + "Z"
+
+    return web.json_response(advert)
 
 
-@app.route('/adverts/<ad_id>', methods=['DELETE'])
-def delete_advert(ad_id):
-    """Удаление объявления по ID (UUID-строка)"""
-    if ad_id not in adverts:
-        return jsonify({'error': 'Advert not found'}), 404
+async def delete_advert(request: web.Request) -> web.Response:
+    """
+    DELETE /adverts/{id}
+    Удаляет объявление.
+    """
+    ad_id = request.match_info.get('id')
 
-    del adverts[ad_id]
-    return jsonify({'message': 'Advert deleted successfully'}), 200
+    if ad_id not in adverts_db:
+        return web.json_response(
+            {"error": "Advert not found"},
+            status=404
+        )
+
+    del adverts_db[ad_id]
+
+    return web.json_response(
+        {"message": "Advert deleted successfully"},
+        status=200
+    )
+
+
+async def init_app() -> web.Application:
+    """
+    Конфигурация приложения и регистрация роутов.
+    """
+    app = web.Application()
+
+    # Регистрация обработчиков с указанием HTTP-методов
+    app.router.add_post('/adverts', create_advert)
+    app.router.add_get('/adverts', get_all_adverts)
+    app.router.add_get('/adverts/{id}', get_advert)
+    app.router.add_put('/adverts/{id}', update_advert)
+    app.router.add_delete('/adverts/{id}', delete_advert)
+
+    return app
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Запуск сервера в async режиме
+    web.run_app(init_app(), host='127.0.0.1', port=5000)
