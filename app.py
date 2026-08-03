@@ -3,9 +3,37 @@ import uuid
 from datetime import datetime
 from aiohttp import web
 
-# Глобальное хранилище (в памяти).
-# В реальном проекте здесь была бы асинхронная база данных (например, AsyncPG для PostgreSQL)
-adverts_db = {}
+
+class AsyncStore:
+    """
+    Асинхронное хранилище данных с блокировкой для безопасного доступа.
+    """
+    def __init__(self):
+        self.data = {}
+        self.lock = asyncio.Lock()
+
+    async def get(self, key):
+        async with self.lock:
+            return self.data.get(key)
+
+    async def set(self, key, value):
+        async with self.lock:
+            self.data[key] = value
+
+    async def delete(self, key):
+        async with self.lock:
+            if key in self.data:
+                del self.data[key]
+                return True
+            return False
+
+    async def list_all(self):
+        async with self.lock:
+            return list(self.data.values())
+
+
+# Создаем глобальный экземпляр хранилища
+store = AsyncStore()
 
 
 async def create_advert(request: web.Request) -> web.Response:
@@ -42,8 +70,8 @@ async def create_advert(request: web.Request) -> web.Response:
         "created_at": datetime.utcnow().isoformat() + "Z"
     }
 
-    # Сохранение в "БД"
-    adverts_db[ad_id] = advert
+    # Асинхронное сохранение
+    await store.set(ad_id, advert)
 
     # Возврат 201 Created
     return web.json_response(advert, status=201)
@@ -54,7 +82,9 @@ async def get_all_adverts(request: web.Request) -> web.Response:
     GET /adverts
     Возвращает список всех объявлений.
     """
-    return web.json_response(list(adverts_db.values()))
+    # Асинхронное получение списка
+    adverts = await store.list_all()
+    return web.json_response(adverts)
 
 
 async def get_advert(request: web.Request) -> web.Response:
@@ -64,13 +94,16 @@ async def get_advert(request: web.Request) -> web.Response:
     """
     ad_id = request.match_info.get('id')
 
-    if ad_id not in adverts_db:
+    # Асинхронное получение
+    advert = await store.get(ad_id)
+
+    if not advert:
         return web.json_response(
             {"error": "Advert not found"},
             status=404
         )
 
-    return web.json_response(adverts_db[ad_id])
+    return web.json_response(advert)
 
 
 async def update_advert(request: web.Request) -> web.Response:
@@ -80,7 +113,10 @@ async def update_advert(request: web.Request) -> web.Response:
     """
     ad_id = request.match_info.get('id')
 
-    if ad_id not in adverts_db:
+    # Получаем текущее объявление
+    advert = await store.get(ad_id)
+
+    if not advert:
         return web.json_response(
             {"error": "Advert not found"},
             status=404
@@ -94,8 +130,6 @@ async def update_advert(request: web.Request) -> web.Response:
             status=400
         )
 
-    advert = adverts_db[ad_id]
-
     # Обновляем только переданные поля
     if 'title' in data:
         advert['title'] = data['title']
@@ -104,8 +138,8 @@ async def update_advert(request: web.Request) -> web.Response:
     if 'owner' in data:
         advert['owner'] = data['owner']
 
-    # Можно обновить время последнего изменения, если нужно:
-    # advert['updated_at'] = datetime.utcnow().isoformat() + "Z"
+    # Асинхронно сохраняем обновленные данные
+    await store.set(ad_id, advert)
 
     return web.json_response(advert)
 
@@ -117,13 +151,14 @@ async def delete_advert(request: web.Request) -> web.Response:
     """
     ad_id = request.match_info.get('id')
 
-    if ad_id not in adverts_db:
+    # Проверяем существование и удаляем асинхронно
+    deleted = await store.delete(ad_id)
+
+    if not deleted:
         return web.json_response(
             {"error": "Advert not found"},
             status=404
         )
-
-    del adverts_db[ad_id]
 
     return web.json_response(
         {"message": "Advert deleted successfully"},
